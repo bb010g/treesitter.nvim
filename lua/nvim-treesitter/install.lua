@@ -66,17 +66,29 @@ local function load_lockfile()
   lockfile = vim.fn.filereadable(filename) == 1 and vim.fn.json_decode(vim.fn.readfile(filename)) or {}
 end
 
-local function get_revision(lang)
-  if #lockfile == 0 then
-    load_lockfile()
+local function git_ls_remote(remote_url)
+  -- I'm sure this can be done in an async way with iter_cmd
+  local lines = vim.fn.systemlist("git ls-remote " .. remote_url)
+  local refs = {}
+  for _, line in ipairs(lines) do
+    local line_values = vim.split(line, "\t")
+    local ref = table.remove(line_values, 2)
+    refs[ref] = line_values
   end
+  return refs
+end
 
-  local install_info = get_parser_install_info(lang)
-  if install_info.revision then
-    return install_info.revision
+local function get_install_info_remote_sha(install_info)
+  local ref = install_info.ref
+  if ref == nil then
+    local branch = install_info.branch
+    if branch then
+      ref = "refs/heads/" .. branch
+    else
+      ref = "HEAD"
+    end
   end
-
-  return (lockfile[lang] and lockfile[lang].revision)
+  return git_ls_remote(install_info.url)[ref][1]
 end
 
 local function get_installed_revision(lang)
@@ -84,6 +96,26 @@ local function get_installed_revision(lang)
   if vim.fn.filereadable(lang_file) == 1 then
     return vim.fn.readfile(lang_file)[1]
   end
+end
+
+local function get_revision(lang)
+  if #lockfile == 0 then
+    load_lockfile()
+  end
+
+  local install_info = get_parser_install_info(lang)
+  local lock = install_info.lock
+  if lock == true then
+    return get_installed_revision(lang)
+  end
+  if install_info.revision then
+    return install_info.revision
+  end
+  if lock == 'remote' then
+    return get_install_info_remote_sha(install_info)
+  end
+
+  return (lockfile[lang] and lockfile[lang].revision)
 end
 
 local function is_installed(lang)
@@ -556,18 +588,7 @@ function M.write_lockfile(verbose, skip_langs)
 
   for _, v in ipairs(sorted_parsers) do
     if not vim.tbl_contains(skip_langs, v.name) then
-      -- I'm sure this can be done in aync way with iter_cmd
-      local sha
-      if v.parser.install_info.branch then
-        sha = vim.split(
-          vim.fn.systemlist(
-            "git ls-remote " .. v.parser.install_info.url .. " | grep refs/heads/" .. v.parser.install_info.branch
-          )[1],
-          "\t"
-        )[1]
-      else
-        sha = vim.split(vim.fn.systemlist("git ls-remote " .. v.parser.install_info.url)[1], "\t")[1]
-      end
+      local sha = get_install_info_remote_sha(v.parser.install_info)
       lockfile[v.name] = { revision = sha }
       if verbose then
         print(v.name .. ": " .. sha)
